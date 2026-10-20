@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
+import re
 from scipy.interpolate import RegularGridInterpolator
 
 # Configuração da página
@@ -70,6 +71,17 @@ def converter_w_m2_para_kcal_min(m_w_m2, a_du):
     kcal_min = watts_totais * 0.014333
     return watts_totais, kcal_min
 
+def obter_classificacao(m_val):
+    """Retorna a categoria e cor referente ao nível de taxa metabólica M (W/m²)"""
+    if m_val < 125:
+        return "Atividade Leve / Repouso", "blue"
+    elif 125 <= m_val < 235:
+        return "Taxa Metabólica Baixa", "green"
+    elif 235 <= m_val < 360:
+        return "Taxa Metabólica Moderada", "orange"
+    else:
+        return "Taxa Metabólica Alta / Muito Alta", "red"
+
 # --- INTERFACE LATERAL DE ENTRADA ---
 st.sidebar.header("📋 Dados Antropométricos")
 
@@ -78,14 +90,18 @@ idade = st.sidebar.number_input("Idade (anos):", min_value=18, max_value=80, val
 peso = st.sidebar.number_input("Peso (kg):", min_value=30.0, max_value=150.0, value=60.0, step=0.1)
 altura = st.sidebar.number_input("Altura (m):", min_value=1.20, max_value=2.20, value=1.65, step=0.01)
 
+# Cálculo da HR Máxima Teórica pela ISO 8996 (208 - 0.7 * idade)
+hr_max_teorica = int(208 - (0.7 * idade))
+
 # Cálculo dos parâmetros do participante
 wbl = calcular_wbl(sexo, peso, altura)
 um_sobre_rm = interpolar_um_sobre_rm(sexo, idade, wbl)
 rm = 1.0 / um_sobre_rm
 a_du = calcular_area_dubois(peso, altura)
 
-# Exibição rápida do perfil no menu lateral
+# Exibição do perfil no menu lateral
 st.sidebar.markdown("---")
+st.sidebar.markdown(f"**$HR_{{max}}$ Estimada:** {hr_max_teorica} bpm")
 st.sidebar.markdown(f"**$W_{{bl}}$ (Massa Magra):** {wbl:.2f} kg")
 st.sidebar.markdown(f"**$A_{{Du}}$ (Área Corporal):** {a_du:.2f} m²")
 st.sidebar.markdown(f"**Fator $RM$:** {rm:.4f}")
@@ -94,11 +110,17 @@ st.sidebar.markdown(f"**Fator $RM$:** {rm:.4f}")
 aba1, aba2 = st.tabs(["⚡ Cálculo Instantâneo (FC Única)", "📈 Análise por Período (Múltiplos Minutos)"])
 
 # =========================================================
-# ABA 1: CÁLCULO PONTO A PONTO
+# ABA 1: CÁLCULO INSTANTÂNEO
 # =========================================================
 with aba1:
     st.subheader("Cálculo a partir de uma Frequência Cardíaca Média")
-    hr_media = st.number_input("Frequência Cardíaca Média (bpm):", min_value=40, max_value=220, value=95, step=1)
+    hr_media = st.number_input(
+        f"Frequência Cardíaca Média (bpm) [Limite $HR_{{max}}$: {hr_max_teorica}]:",
+        min_value=40,
+        max_value=hr_max_teorica,
+        value=min(95, hr_max_teorica),
+        step=1
+    )
 
     m_metabolismo = ((hr_media - 70) * rm) + 100
     watts_totais, kcal_min = converter_w_m2_para_kcal_min(m_metabolismo, a_du)
@@ -109,19 +131,7 @@ with aba1:
     col_m2.metric("Potência Total", f"{watts_totais:.2f} W")
     col_m3.metric("Gasto por Minuto", f"{kcal_min:.2f} kcal/min")
 
-    if m_metabolismo < 125:
-        categoria = "Descanso / Atividade Leve"
-        cor = "blue"
-    elif 125 <= m_metabolismo < 235:
-        categoria = "Taxa Metabólica Baixa"
-        cor = "green"
-    elif 235 <= m_metabolismo < 360:
-        categoria = "Taxa Metabólica Moderada"
-        cor = "orange"
-    else:
-        categoria = "Taxa Metabólica Alta / Muito Alta"
-        cor = "red"
-
+    categoria, cor = obter_classificacao(m_metabolismo)
     st.subheader(f"Classificação pela Norma: :{cor}[**{categoria}**]")
 
 # =========================================================
@@ -131,7 +141,6 @@ with aba2:
     st.subheader("Análise Contínua de Período Monitorado")
     st.write("Insira os valores de Frequência Cardíaca registrados minuto a minuto durante a atividade.")
 
-    # Opção de entrada de dados
     opcao_entrada = st.radio("Como deseja inserir os dados?", ["Digitar / Colar lista de BPMs", "Upload de arquivo (CSV/Excel)"], horizontal=True)
 
     lista_hr = []
@@ -139,14 +148,12 @@ with aba2:
     if opcao_entrada == "Digitar / Colar lista de BPMs":
         texto_bpm = st.text_area(
             "Cole os valores de BPM por minuto (separados por vírgula, espaço ou quebra de linha):",
-            value="85, 90, 95, 110, 115, 120, 105, 98, 92, 88",
+            value="85, 90, 95, 110, 125, 140, 155, 130, 110, 95",
             height=120
         )
         if texto_bpm.strip():
-            # Limpa e converte a string colada em uma lista de números
-            import re
             valores = re.findall(r'\d+', texto_bpm)
-            lista_hr = [float(v) for v in valores if 40 <= float(v) <= 220]
+            lista_hr = [float(v) for v in valores if 40 <= float(v) <= hr_max_teorica]
 
     else:
         arquivo = st.file_uploader("Selecione o arquivo CSV ou Excel (deve conter uma coluna com valores de FC):", type=["csv", "xlsx"])
@@ -157,24 +164,25 @@ with aba2:
                 else:
                     df_upload = pd.read_excel(arquivo)
                 coluna = st.selectbox("Selecione a coluna que contém os batimentos cardíacos (BPM):", df_upload.columns)
-                lista_hr = df_upload[coluna].dropna().tolist()
+                valores_brutos = df_upload[coluna].dropna().tolist()
+                lista_hr = [float(v) for v in valores_brutos if 40 <= float(v) <= hr_max_teorica]
             except Exception as e:
                 st.error(f"Erro ao ler o arquivo: {e}")
 
     if len(lista_hr) > 0:
         duracao_min = len(lista_hr)
         
-        # Cria Tabela com os cálculos minuto a minuto
+        # Montagem do DataFrame minuto a minuto
         df_resultados = pd.DataFrame({"Minuto": range(1, duracao_min + 1), "FC (bpm)": lista_hr})
         df_resultados["M (W/m²)"] = ((df_resultados["FC (bpm)"] - 70) * rm) + 100
         df_resultados["Potência (W)"] = df_resultados["M (W/m²)"] * a_du
         df_resultados["Gasto (kcal/min)"] = df_resultados["Potência (W)"] * 0.014333
+        df_resultados["Classificação"] = df_resultados["M (W/m²)"].apply(lambda x: obter_classificacao(x)[0])
 
-        # Totais e Médias do Período
+        # Métricas do Período Global
         fc_media_periodo = np.mean(lista_hr)
         gasto_total_kcal = df_resultados["Gasto (kcal/min)"].sum()
         m_medio_periodo = df_resultados["M (W/m²)"].mean()
-        watts_medios = df_resultados["Potência (W)"].mean()
 
         st.markdown("---")
         st.markdown(f"### ⏱️ Resumo da Atividade Monitorada ({duracao_min} minutos)")
@@ -182,15 +190,19 @@ with aba2:
         col_t1, col_t2, col_t3, col_t4 = st.columns(4)
         col_t1.metric("Duração Total", f"{duracao_min} min")
         col_t2.metric("FC Média do Período", f"{fc_media_periodo:.1f} bpm")
-        col_t3.metric("Médias da Atividade", f"{m_medio_periodo:.1f} W/m²")
-        col_t4.metric("🔥 Gasto Energético Total", f"{gasto_total_kcal:.2f} kcal", delta_color="normal")
+        col_t3.metric("Taxa Metabólica Média", f"{m_medio_periodo:.1f} W/m²")
+        col_t4.metric("🔥 Gasto Energético Total", f"{gasto_total_kcal:.2f} kcal")
 
-        # Gráfico da evolução temporal da Taxa Metabólica e FC
-        st.subheader("📈 Comportamento ao Longo da Atividade")
+        # Classificação global média da atividade
+        cat_global, cor_global = obter_classificacao(m_medio_periodo)
+        st.subheader(f"Classificação Média do Período: :{cor_global}[**{cat_global}**]")
+
+        # Gráfico da evolução temporal
+        st.subheader("📈 Evolução Temporal da Atividade")
         st.line_chart(df_resultados.set_index("Minuto")[["FC (bpm)", "Gasto (kcal/min)"]])
 
-        # Tabela expansível
-        with st.expander("📋 Ver tabela detalhada minuto a minuto"):
+        # Tabela detalhada minuto a minuto
+        with st.expander("📋 Ver detalhamento minuto a minuto"):
             st.dataframe(df_resultados.style.format({
                 "FC (bpm)": "{:.0f}",
                 "M (W/m²)": "{:.2f}",
@@ -199,4 +211,4 @@ with aba2:
             }), use_container_width=True)
 
     else:
-        st.info("Insira ou faça upload dos dados de Frequência Cardíaca para calcular a atividade.")
+        st.info("Insira ou faça upload dos dados de Frequência Cardíaca para calcular o período.")
